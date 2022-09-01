@@ -48,7 +48,7 @@ class TafParseSpider(scrapy.Spider):
                          'seller': each_sku['seller'],
                          'available': each_sku['available'],
                          'available_quantity': each_sku['availablequantity'],
-                         'size': list(each_sku['dimensions'].items())[0]})
+                         'size': each_sku['dimensions']})
         return skus
 
     def raw_data_extractor(self,response):
