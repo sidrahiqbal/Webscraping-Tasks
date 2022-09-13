@@ -1,6 +1,5 @@
 import json
-from urllib.parse import urljoin
-from urllib.request import urlopen
+import urllib
 
 import scrapy
 from scrapy.linkextractors import LinkExtractor
@@ -10,83 +9,97 @@ from Taf.items import TafItem
 
 
 class TafParseSpider(scrapy.Spider):
-    name = "taf"
+    name = "taf_parse"
+    BASE_URL = 'https://www.taf.com.mx/api/catalog_system/pub/products/search'
+    item = TafItem()
 
-    def product_id(self, response):
+    def retailer_sku(self, response):
         return self.raw_data_extractor(response)['productId']
 
+    def market(self, response):
+        return response.css('meta[name="country"]::attr(content)').get()
+
+    def lang(self, response):
+        return response.css('html::attr(lang)').get().split('-')[0]
+
     def gender(self, response):
-        return response.css('td[class="value-field Genero"]::text').get()
+        return response['Género']
 
     def color(self, response):
-        return response.css('td[class="value-field Color"]::text').get()
+        return response['Color']
 
     def brand(self, response):
-        return self.raw_data_extractor(response)['productBrandName']
+        return response['brand']
 
     def category(self, response):
-        return self.raw_data_extractor(response)['productDepartmentName']
+        return response['categories']
 
-    def subcategory(self, response):
-        return self.raw_data_extractor(response)['productCategoryName']
-
-    def product_name(self, response):
-        return self.raw_data_extractor(response)['productName']
+    def name(self, response):
+        return response['productName']
 
     def url(self, response):
         return self.raw_data_extractor(response)['pageUrl']
 
     def description(self, response):
-        return response.css('.productDescription ::text').get()
+        return response['description']
+
+    def price(self, response):
+        return response['items'][0]['sellers'][0]['commertialOffer']['Price']
+
+    def currency(self, response):
+        local_info = json.loads(response.css('script:contains(Currency)::text').get().split('=')[-1].replace(';', ''))
+        return local_info['CurrencyLocale']['CurrencyEnglishName']
 
     def sku(self, response):
         skus = []
-        for each_sku in self.skus_data_extractor(response)['skus']:
-            skus.append({'sku_id': each_sku['sku'],
-                         'sku_name': each_sku['skuname'],
-                         'price': each_sku['bestPrice'],
-                         'seller': each_sku['seller'],
-                         'available': each_sku['available'],
-                         'available_quantity': each_sku['availablequantity'],
-                         'size': each_sku['dimensions']})
+
+        for each_sku in response['items']:
+            skus.append({'sku_id': each_sku['itemId'],
+                         'name': each_sku['name'],
+                         'price': each_sku['sellers'][0]['commertialOffer']['Price'],
+                         'available': each_sku['sellers'][0]['commertialOffer']['IsAvailable'],
+                         'currency': self.currency(page_response),
+                         'size': each_sku['name'].split(':')[1]})
+
         return skus
 
     def raw_data_extractor(self,response):
         return json.loads(response.css('script:contains(sku)::text').getall()[1].replace('\nvtex.events.addData(', '').replace(');\n', ''))
 
-    def skus_data_extractor(self, response):
-        return json.loads(response.css('script:contains(sku)::text').getall()[-1].replace("var skuJson_0 = ", '').replace(";CATALOG_SDK.setProductWithVariationsCache(skuJson_0.productId, skuJson_0); var skuJson = skuJson_0;", ''))
+    def image_url(self, response):
+        return [image['imageUrl'] for image in response['items'][0]['images']]
 
-    def image_urls(self, response):
-        sku_id = list(self.raw_data_extractor(response)['skuStocks'].keys())[0]
-        result = urlopen(urljoin('https://www.taf.com.mx/produto/sku/', sku_id))
-        result = json.loads(result.read())
-        image_urls = []
+    def product_search(self, response):
+        product_info = json.loads(response.text)[0]
+        self.item['image_urls'] = self.image_url(product_info)
+        self.item['name'] = self.name(product_info)
+        self.item['brand'] = self.brand(product_info)
+        self.item['description'] = self.description(product_info)
+        self.item['gender'] = self.gender(product_info)
+        self.item['category'] = self.category(product_info)
+        self.item['price'] = self.price(product_info)
+        self.item['skus'] = self.sku(product_info)
 
-        for each in result[0]['Images']:
-            image_urls.append((each[0]['Path']))
-
-        return image_urls
+        yield self.item
 
     def parse(self, response):
-        item = TafItem()
-        item['product_id'] = self.product_id(response)
-        item['url'] = self.url(response)
-        item['image_urls'] = self.image_urls(response)
-        item['gender'] = self.gender(response)
-        item['color'] = self.color(response)
-        item['brand'] = self.brand(response)
-        item['category'] = self.category(response)
-        item['subcategory'] = self.subcategory(response)
-        item['name'] = self.product_name(response)
-        item['description'] = self.description(response)
-        item['skus'] = self.sku(response)
+        global page_response
+        page_response = response
+        pid = int(self.retailer_sku(response))
+        params = {'fq': f'productId:{pid}'}
+        url = f'{self.BASE_URL}?{urllib.parse.urlencode(params)}'
 
-        yield item
+        self.item['retailer_sku'] = self.retailer_sku(response)
+        self.item['lang'] = self.lang(response)
+        self.item['url'] = self.url(response)
+        self.item['market'] = self.market(response)
+        self.item['currency'] = self.currency(response)
+
+        yield scrapy.Request(url=url, method='GET', callback=self.product_search)
 
 
 class Taf(CrawlSpider):
-    name = "taf_spider"
+    name = "taf_crawl"
     start_urls = ['https://www.taf.com.mx/']
     parse_spider = TafParseSpider()
     allowed_domains = ['taf.com.mx']
