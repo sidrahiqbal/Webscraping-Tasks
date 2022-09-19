@@ -8,19 +8,47 @@ from scrapy.spiders import CrawlSpider, Rule
 from Taf.items import TafItem
 
 
-class TafParseSpider(scrapy.Spider):
-    name = "taf_parse"
+class Mixin:
     BASE_URL = 'https://www.taf.com.mx/api/catalog_system/pub/products/search'
-    item = TafItem()
+    start_urls = ['https://www.taf.com.mx/']
+    allowed_domains = ['taf.com.mx']
+    lang = 'es'
+    market = 'MEX'
+    currency = 'Mexican Peso'
+
+
+class TafParseSpider(Mixin, scrapy.Spider):
+    name = "taf_parse"
+    BASE_URL = Mixin.BASE_URL
+
+    def parse(self, response):
+        pid = int(self.retailer_sku(response))
+        params = {'fq': f'productId:{pid}'}
+        url = f'{self.BASE_URL}?{urllib.parse.urlencode(params)}'
+
+        yield scrapy.Request(url=url, method='GET', callback=self.product_search, meta={'first_response': response})
+
+    def product_search(self, response):
+        product_info = json.loads(response.text)[0]
+        item = TafItem()
+        item['retailer_sku'] = self.retailer_sku(response.meta.get('first_response'))
+        item['lang'] = Mixin.lang
+        item['url'] = self.url(response.meta.get('first_response'))
+        item['market'] = Mixin.market
+        item['currency'] = Mixin.currency
+        item['image_urls'] = self.image_url(product_info)
+        item['name'] = self.name(product_info)
+        item['brand'] = self.brand(product_info)
+        item['description'] = self.description(product_info)
+        item['gender'] = self.gender(product_info)
+        item['category'] = self.category(product_info)
+        item['price'] = self.price(product_info)
+        item['skus'] = self.sku(product_info)
+
+        yield item
 
     def retailer_sku(self, response):
         return self.raw_data_extractor(response)['productId']
-
-    def market(self, response):
-        return response.css('meta[name="country"]::attr(content)').get()
-
-    def lang(self, response):
-        return response.css('html::attr(lang)').get().split('-')[0]
 
     def gender(self, response):
         return response['Género']
@@ -46,10 +74,6 @@ class TafParseSpider(scrapy.Spider):
     def price(self, response):
         return response['items'][0]['sellers'][0]['commertialOffer']['Price']
 
-    def currency(self, response):
-        local_info = json.loads(response.css('script:contains(Currency)::text').get().split('=')[-1].replace(';', ''))
-        return local_info['CurrencyLocale']['CurrencyEnglishName']
-
     def sku(self, response):
         skus = []
 
@@ -57,52 +81,25 @@ class TafParseSpider(scrapy.Spider):
             skus.append({'sku_id': each_sku['itemId'],
                          'name': each_sku['name'],
                          'price': each_sku['sellers'][0]['commertialOffer']['Price'],
-                         'available': each_sku['sellers'][0]['commertialOffer']['IsAvailable'],
-                         'currency': self.currency(page_response),
+                         'out_of_stock': False if each_sku['sellers'][0]['commertialOffer']['IsAvailable'] else True,
+                         'currency': Mixin.currency,
                          'size': each_sku['name'].split(':')[1]})
 
         return skus
 
-    def raw_data_extractor(self,response):
-        return json.loads(response.css('script:contains(sku)::text').getall()[1].replace('\nvtex.events.addData(', '').replace(');\n', ''))
+    def raw_data_extractor(self, response):
+        sku_script = response.css('script:contains(sku)::text').getall()[1]
+        return json.loads(sku_script.replace('\nvtex.events.addData(', '').replace(');\n', ''))
 
     def image_url(self, response):
         return [image['imageUrl'] for image in response['items'][0]['images']]
 
-    def product_search(self, response):
-        product_info = json.loads(response.text)[0]
-        self.item['image_urls'] = self.image_url(product_info)
-        self.item['name'] = self.name(product_info)
-        self.item['brand'] = self.brand(product_info)
-        self.item['description'] = self.description(product_info)
-        self.item['gender'] = self.gender(product_info)
-        self.item['category'] = self.category(product_info)
-        self.item['price'] = self.price(product_info)
-        self.item['skus'] = self.sku(product_info)
 
-        yield self.item
-
-    def parse(self, response):
-        global page_response
-        page_response = response
-        pid = int(self.retailer_sku(response))
-        params = {'fq': f'productId:{pid}'}
-        url = f'{self.BASE_URL}?{urllib.parse.urlencode(params)}'
-
-        self.item['retailer_sku'] = self.retailer_sku(response)
-        self.item['lang'] = self.lang(response)
-        self.item['url'] = self.url(response)
-        self.item['market'] = self.market(response)
-        self.item['currency'] = self.currency(response)
-
-        yield scrapy.Request(url=url, method='GET', callback=self.product_search)
-
-
-class Taf(CrawlSpider):
+class Taf(Mixin, CrawlSpider):
     name = "taf_crawl"
-    start_urls = ['https://www.taf.com.mx/']
+    start_urls = Mixin.start_urls
     parse_spider = TafParseSpider()
-    allowed_domains = ['taf.com.mx']
+    allowed_domains = Mixin.allowed_domains
     rules = (
         Rule(LinkExtractor(allow=(r'/p$',)), callback=parse_spider.parse),
         Rule(LinkExtractor(restrict_css=('.nav-item--level-1', '.product-list__wrapper'))),
